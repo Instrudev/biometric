@@ -58,11 +58,16 @@ def crear_esquema_y_tabla() -> None:
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 first_name VARCHAR(255) NOT NULL,
                 first_last_name VARCHAR(255) NOT NULL,
+                document_number VARCHAR(255),
                 biometric_code LONGTEXT
             )
         """)
         try:
             cursor.execute("ALTER TABLE people MODIFY COLUMN biometric_code LONGTEXT")
+        except mysql.connector.Error:
+            pass
+        try:
+            cursor.execute("ALTER TABLE people ADD COLUMN document_number VARCHAR(255)")
         except mysql.connector.Error:
             pass
         conn.commit(); cursor.close(); conn.close()
@@ -87,7 +92,9 @@ def guardar_en_db(nombre: str, datos: bytes) -> None:
     except mysql.connector.Error as e:
         messagebox.showerror('Error DB', f'Error al guardar: {e}')
 
-def obtener_personas(filtro: str | None = None) -> list[tuple[int, str, str, str | None]]:
+def obtener_personas(
+    filtro: str | None = None,
+) -> list[tuple[int, str, str, str | None, str | None]]:
     """Recupera las personas registradas en la tabla people."""
     try:
         conn = abrir_conexion()
@@ -96,16 +103,19 @@ def obtener_personas(filtro: str | None = None) -> list[tuple[int, str, str, str
             patron = f"%{filtro}%"
             cursor.execute(
                 """
-                SELECT id, first_name, first_last_name, biometric_code
+                SELECT id, first_name, first_last_name, document_number, biometric_code
                 FROM people
                 WHERE first_name LIKE %s
                    OR first_last_name LIKE %s
+                   OR COALESCE(document_number, '') LIKE %s
                    OR COALESCE(biometric_code, '') LIKE %s
                 """,
-                (patron, patron, patron),
+                (patron, patron, patron, patron),
             )
         else:
-            cursor.execute("SELECT id, first_name, first_last_name, biometric_code FROM people")
+            cursor.execute(
+                "SELECT id, first_name, first_last_name, document_number, biometric_code FROM people"
+            )
         rows = cursor.fetchall()
         cursor.close(); conn.close()
         return rows
@@ -247,11 +257,15 @@ class AplicacionHuella(tk.Frame):
         tabla_frame = ttk.LabelFrame(self, text='Personas (tabla people)')
         tabla_frame.place(x=20, y=310, width=520, height=160)
 
-        columns = ('first_name', 'first_last_name', 'biometric_code')
+        columns = ('first_name', 'first_last_name', 'document_number', 'biometric_code')
         self.tabla = ttk.Treeview(tabla_frame, columns=columns, show='headings', height=6)
-        for col, title in zip(columns, ('Nombre', 'Apellido', 'Código biométrico')):
+        for col, title in zip(
+            columns,
+            ('Nombre', 'Apellido', 'Documento', 'Código biométrico'),
+        ):
             self.tabla.heading(col, text=title)
-            self.tabla.column(col, width=150 if col != 'biometric_code' else 180, anchor='center')
+            width = 140 if col != 'biometric_code' else 180
+            self.tabla.column(col, width=width, anchor='center')
         self.tabla.pack(side='left', fill='both', expand=True, padx=(0, 0), pady=5)
 
         scrollbar = ttk.Scrollbar(tabla_frame, orient='vertical', command=self.tabla.yview)
@@ -329,9 +343,13 @@ class AplicacionHuella(tk.Frame):
         """Carga los registros de la tabla people en el Treeview."""
         for item in self.tabla.get_children():
             self.tabla.delete(item)
-        for person_id, first_name, first_last_name, codigo in obtener_personas(filtro):
-            self.tabla.insert('', 'end', iid=str(person_id),
-                              values=(first_name, first_last_name, codigo or ''))
+        for person_id, first_name, first_last_name, documento, codigo in obtener_personas(filtro):
+            self.tabla.insert(
+                '',
+                'end',
+                iid=str(person_id),
+                values=(first_name, first_last_name, documento or '', codigo or ''),
+            )
         for seleccion in self.tabla.selection():
             self.tabla.selection_remove(seleccion)
         self._mostrar_codigo('')
@@ -343,7 +361,7 @@ class AplicacionHuella(tk.Frame):
         if not seleccion:
             return
         item = self.tabla.item(seleccion[0])
-        codigo = item['values'][2] if len(item['values']) > 2 else ''
+        codigo = item['values'][3] if len(item['values']) > 3 else ''
         self._mostrar_codigo(codigo or '')
         self.datos_huella = b''
 
