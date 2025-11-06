@@ -11,10 +11,11 @@ Esta versión añade un módulo de validación de identidad:
     y compara ambas plantillas.
 """
 
+import base64
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 try:
     import mysql.connector  # type: ignore[import]
@@ -28,7 +29,7 @@ DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
     'password': '',
-    'database': 'biometric_db',
+    'database': 'sicefa',
 }
 
 def crear_esquema_y_tabla() -> None:
@@ -39,7 +40,7 @@ def crear_esquema_y_tabla() -> None:
     try:
         conn = mysql.connector.connect(host=DB_CONFIG['host'], user=DB_CONFIG['user'], password=DB_CONFIG['password'])
         cursor = conn.cursor()
-        cursor.execute("CREATE DATABASE IF NOT EXISTS biometric_db CHARACTER SET utf8mb4")
+        cursor.execute("CREATE DATABASE IF NOT EXISTS sicefa CHARACTER SET utf8mb4")
         cursor.close(); conn.close()
 
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -52,6 +53,23 @@ def crear_esquema_y_tabla() -> None:
                 fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS people (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                first_name VARCHAR(255) NOT NULL,
+                first_last_name VARCHAR(255) NOT NULL,
+                document_number VARCHAR(255),
+                biometric_code LONGTEXT
+            )
+        """)
+        try:
+            cursor.execute("ALTER TABLE people MODIFY COLUMN biometric_code LONGTEXT")
+        except mysql.connector.Error:
+            pass
+        try:
+            cursor.execute("ALTER TABLE people ADD COLUMN document_number VARCHAR(255)")
+        except mysql.connector.Error:
+            pass
         conn.commit(); cursor.close(); conn.close()
 
     except mysql.connector.Error as e:
@@ -74,6 +92,51 @@ def guardar_en_db(nombre: str, datos: bytes) -> None:
     except mysql.connector.Error as e:
         messagebox.showerror('Error DB', f'Error al guardar: {e}')
 
+def obtener_personas(
+    filtro: str | None = None,
+) -> list[tuple[int, str, str, str | None, str | None]]:
+    """Recupera las personas registradas en la tabla people."""
+    try:
+        conn = abrir_conexion()
+        cursor = conn.cursor()
+        if filtro:
+            patron = f"%{filtro}%"
+            cursor.execute(
+                """
+                SELECT id, first_name, first_last_name, document_number, biometric_code
+                FROM people
+                WHERE first_name LIKE %s
+                   OR first_last_name LIKE %s
+                   OR COALESCE(document_number, '') LIKE %s
+                   OR COALESCE(biometric_code, '') LIKE %s
+                """,
+                (patron, patron, patron, patron),
+            )
+        else:
+            cursor.execute(
+                "SELECT id, first_name, first_last_name, document_number, biometric_code FROM people"
+            )
+        rows = cursor.fetchall()
+        cursor.close(); conn.close()
+        return rows
+    except mysql.connector.Error as e:  # type: ignore[attr-defined]
+        messagebox.showerror('Error DB', f'No se pudo consultar la tabla people: {e}')
+    return []
+
+def actualizar_codigo_persona(person_id: int, codigo: str) -> None:
+    """Actualiza el biometric_code de una persona."""
+    try:
+        conn = abrir_conexion()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE people SET biometric_code = %s WHERE id = %s",
+            (codigo, person_id),
+        )
+        conn.commit(); cursor.close(); conn.close()
+        messagebox.showinfo('Actualización', 'Código biométrico actualizado correctamente.')
+    except mysql.connector.Error as e:  # type: ignore[attr-defined]
+        messagebox.showerror('Error DB', f'No se pudo actualizar: {e}')
+
 def capturar_huella_desde_archivo() -> bytes:
     ruta = filedialog.askopenfilename(
         title='Seleccione la imagen o plantilla de huella',
@@ -85,6 +148,12 @@ def capturar_huella_desde_archivo() -> bytes:
         except Exception as ex:
             messagebox.showerror('Error de archivo', f'No se pudo leer el archivo: {ex}')
     return b''
+
+def codificar_huella(datos: bytes) -> str:
+    """Convierte los bytes de la huella en un string base64."""
+    if not datos:
+        return ''
+    return base64.b64encode(datos).decode('ascii')
 
 def captura_en_hilo(callback):
     """Captura la huella en un hilo y luego invoca callback."""
@@ -147,12 +216,14 @@ class AplicacionHuella(tk.Frame):
         super().__init__(master)
         self.master = master
         master.title('Registro y Validación Biométrica')
-        master.geometry('520x300')
+        master.geometry('560x520')
         master.resizable(False, False)
         self.pack(fill='both', expand=True)
 
         self.nombre_var = tk.StringVar()
         self.datos_huella = b''
+        self.codigo_var = tk.StringVar()
+        self.busqueda_var = tk.StringVar()
 
         tk.Label(self, text='Nombre o ID (sólo para registro):').place(x=20,y=20)
         tk.Entry(self, textvariable=self.nombre_var, width=40).place(x=200,y=20)
@@ -169,17 +240,54 @@ class AplicacionHuella(tk.Frame):
                   command=self.on_guardar).place(x=20,y=150,width=240,height=35)
         tk.Button(self, text='Validar identidad', bg='#2196F3', fg='white',
                   command=self.on_validar).place(x=280,y=150,width=240,height=35)
-        tk.Button(self, text='Salir', command=master.quit).place(x=20,y=205,width=500,height=35)
+
+        ttk.Separator(self, orient='horizontal').place(x=20, y=210, width=520)
+
+        tk.Label(self, text='Buscar:').place(x=20, y=240)
+        tk.Entry(self, textvariable=self.busqueda_var, width=30).place(x=80, y=240)
+        tk.Button(self, text='Aplicar búsqueda', command=self.on_buscar).place(x=320, y=235, width=140, height=30)
+        tk.Button(self, text='Limpiar', command=self.on_limpiar_busqueda).place(x=470, y=235, width=70, height=30)
+
+        tk.Label(self, text='Código biométrico:').place(x=20, y=270)
+        self.codigo_entry = tk.Entry(self, textvariable=self.codigo_var, width=60, state='readonly')
+        self.codigo_entry.place(x=160, y=270)
+        tk.Button(self, text='Actualizar código', command=self.on_actualizar_codigo,
+                  bg='#FF9800', fg='white').place(x=360, y=265, width=160, height=30)
+
+        tabla_frame = ttk.LabelFrame(self, text='Personas (tabla people)')
+        tabla_frame.place(x=20, y=310, width=520, height=160)
+
+        columns = ('first_name', 'first_last_name', 'document_number', 'biometric_code')
+        self.tabla = ttk.Treeview(tabla_frame, columns=columns, show='headings', height=6)
+        for col, title in zip(
+            columns,
+            ('Nombre', 'Apellido', 'Documento', 'Código biométrico'),
+        ):
+            self.tabla.heading(col, text=title)
+            width = 140 if col != 'biometric_code' else 180
+            self.tabla.column(col, width=width, anchor='center')
+        self.tabla.pack(side='left', fill='both', expand=True, padx=(0, 0), pady=5)
+
+        scrollbar = ttk.Scrollbar(tabla_frame, orient='vertical', command=self.tabla.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.tabla.configure(yscrollcommand=scrollbar.set)
+
+        self.tabla.bind('<<TreeviewSelect>>', self.on_seleccionar_persona)
+
+        tk.Button(self, text='Salir', command=master.quit).place(x=20,y=480,width=520,height=35)
 
         crear_esquema_y_tabla()
+        self.cargar_personas()
 
     def on_capturar_archivo(self):
         datos = capturar_huella_desde_archivo()
         if datos:
             self.datos_huella = datos
             self.estado.config(text='✅ Huella cargada (archivo)', fg='green')
+            self._mostrar_codigo(codificar_huella(datos))
         else:
             self.estado.config(text='❌ Huella no capturada', fg='red')
+            self._mostrar_codigo('')
 
     def on_capturar_sensor(self):
         self.estado.config(text='⏳ Capturando huella...', fg='orange')
@@ -187,6 +295,7 @@ class AplicacionHuella(tk.Frame):
         def terminar(success, data, identidad):
             if success and data:
                 self.datos_huella = data
+                self._mostrar_codigo(codificar_huella(data))
                 if identidad:
                     self.estado.config(text=f'✔ Usuario validado: {identidad}', fg='blue')
                 else:
@@ -195,7 +304,9 @@ class AplicacionHuella(tk.Frame):
             else:
                 self.datos_huella = b''
                 self.estado.config(text='❌ Error al capturar', fg='red')
-                messagebox.showerror('Captura', data if not success else '')
+                mensaje = identidad if isinstance(identidad, str) and identidad else 'No se pudo capturar la huella.'
+                messagebox.showerror('Captura', mensaje)
+                self._mostrar_codigo('')
         threading.Thread(target=captura_en_hilo, args=(terminar,), daemon=True).start()
 
     def on_guardar(self):
@@ -227,6 +338,67 @@ class AplicacionHuella(tk.Frame):
         else:
             self.estado.config(text='✖ Huella no reconocida', fg='red')
             messagebox.showwarning('Validación','No se encontró coincidencia en la base de datos.')
+
+    def cargar_personas(self, filtro: str | None = None):
+        """Carga los registros de la tabla people en el Treeview."""
+        for item in self.tabla.get_children():
+            self.tabla.delete(item)
+        for person_id, first_name, first_last_name, documento, codigo in obtener_personas(filtro):
+            self.tabla.insert(
+                '',
+                'end',
+                iid=str(person_id),
+                values=(first_name, first_last_name, documento or '', codigo or ''),
+            )
+        for seleccion in self.tabla.selection():
+            self.tabla.selection_remove(seleccion)
+        self._mostrar_codigo('')
+        self.datos_huella = b''
+
+    def on_seleccionar_persona(self, _event=None):
+        """Cuando se selecciona una persona, muestra su código actual."""
+        seleccion = self.tabla.selection()
+        if not seleccion:
+            return
+        item = self.tabla.item(seleccion[0])
+        codigo = item['values'][3] if len(item['values']) > 3 else ''
+        self._mostrar_codigo(codigo or '')
+        self.datos_huella = b''
+
+    def on_actualizar_codigo(self):
+        seleccion = self.tabla.selection()
+        if not seleccion:
+            messagebox.showwarning('Actualización', 'Selecciona una persona de la tabla.')
+            return
+        if not self.datos_huella:
+            messagebox.showwarning('Actualización', 'Captura una huella antes de actualizar el código.')
+            return
+        try:
+            person_id = int(seleccion[0])
+        except ValueError:
+            messagebox.showerror('Actualización', 'Identificador inválido.')
+            return
+        codigo = codificar_huella(self.datos_huella)
+        actualizar_codigo_persona(person_id, codigo)
+        self.cargar_personas()
+        self.estado.config(text='✔ Código biométrico actualizado', fg='blue')
+        self.datos_huella = b''
+        self._mostrar_codigo(codigo)
+
+    def on_buscar(self):
+        filtro = self.busqueda_var.get().strip()
+        self.cargar_personas(filtro or None)
+
+    def on_limpiar_busqueda(self):
+        self.busqueda_var.set('')
+        self.cargar_personas()
+
+    def _mostrar_codigo(self, codigo: str) -> None:
+        """Actualiza el campo visible del código respetando el estado readonly."""
+        state = self.codigo_entry.cget('state')
+        self.codigo_entry.configure(state='normal')
+        self.codigo_var.set(codigo)
+        self.codigo_entry.configure(state=state)
 
 def main():
     root = tk.Tk()
