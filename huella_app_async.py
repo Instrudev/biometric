@@ -11,6 +11,7 @@ Esta versión añade un módulo de validación de identidad:
     y compara ambas plantillas.
 """
 
+import base64
 import threading
 import time
 import tkinter as tk
@@ -57,9 +58,13 @@ def crear_esquema_y_tabla() -> None:
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 first_name VARCHAR(255) NOT NULL,
                 first_last_name VARCHAR(255) NOT NULL,
-                biometric_code VARCHAR(255)
+                biometric_code LONGTEXT
             )
         """)
+        try:
+            cursor.execute("ALTER TABLE people MODIFY COLUMN biometric_code LONGTEXT")
+        except mysql.connector.Error:
+            pass
         conn.commit(); cursor.close(); conn.close()
 
     except mysql.connector.Error as e:
@@ -120,6 +125,12 @@ def capturar_huella_desde_archivo() -> bytes:
         except Exception as ex:
             messagebox.showerror('Error de archivo', f'No se pudo leer el archivo: {ex}')
     return b''
+
+def codificar_huella(datos: bytes) -> str:
+    """Convierte los bytes de la huella en un string base64."""
+    if not datos:
+        return ''
+    return base64.b64encode(datos).decode('ascii')
 
 def captura_en_hilo(callback):
     """Captura la huella en un hilo y luego invoca callback."""
@@ -209,7 +220,8 @@ class AplicacionHuella(tk.Frame):
         ttk.Separator(self, orient='horizontal').place(x=20, y=210, width=520)
 
         tk.Label(self, text='Código biométrico:').place(x=20, y=230)
-        tk.Entry(self, textvariable=self.codigo_var, width=25).place(x=160, y=230)
+        self.codigo_entry = tk.Entry(self, textvariable=self.codigo_var, width=60, state='readonly')
+        self.codigo_entry.place(x=160, y=230)
         tk.Button(self, text='Actualizar código', command=self.on_actualizar_codigo,
                   bg='#FF9800', fg='white').place(x=360, y=225, width=160, height=30)
 
@@ -239,8 +251,10 @@ class AplicacionHuella(tk.Frame):
         if datos:
             self.datos_huella = datos
             self.estado.config(text='✅ Huella cargada (archivo)', fg='green')
+            self._mostrar_codigo(codificar_huella(datos))
         else:
             self.estado.config(text='❌ Huella no capturada', fg='red')
+            self._mostrar_codigo('')
 
     def on_capturar_sensor(self):
         self.estado.config(text='⏳ Capturando huella...', fg='orange')
@@ -248,6 +262,7 @@ class AplicacionHuella(tk.Frame):
         def terminar(success, data, identidad):
             if success and data:
                 self.datos_huella = data
+                self._mostrar_codigo(codificar_huella(data))
                 if identidad:
                     self.estado.config(text=f'✔ Usuario validado: {identidad}', fg='blue')
                 else:
@@ -256,7 +271,9 @@ class AplicacionHuella(tk.Frame):
             else:
                 self.datos_huella = b''
                 self.estado.config(text='❌ Error al capturar', fg='red')
-                messagebox.showerror('Captura', data if not success else '')
+                mensaje = identidad if isinstance(identidad, str) and identidad else 'No se pudo capturar la huella.'
+                messagebox.showerror('Captura', mensaje)
+                self._mostrar_codigo('')
         threading.Thread(target=captura_en_hilo, args=(terminar,), daemon=True).start()
 
     def on_guardar(self):
@@ -304,24 +321,35 @@ class AplicacionHuella(tk.Frame):
             return
         item = self.tabla.item(seleccion[0])
         codigo = item['values'][2] if len(item['values']) > 2 else ''
-        self.codigo_var.set(codigo or '')
+        self._mostrar_codigo(codigo or '')
+        self.datos_huella = b''
 
     def on_actualizar_codigo(self):
         seleccion = self.tabla.selection()
         if not seleccion:
             messagebox.showwarning('Actualización', 'Selecciona una persona de la tabla.')
             return
-        codigo = self.codigo_var.get().strip()
-        if not codigo:
-            messagebox.showwarning('Actualización', 'Escribe un código biométrico válido.')
+        if not self.datos_huella:
+            messagebox.showwarning('Actualización', 'Captura una huella antes de actualizar el código.')
             return
         try:
             person_id = int(seleccion[0])
         except ValueError:
             messagebox.showerror('Actualización', 'Identificador inválido.')
             return
+        codigo = codificar_huella(self.datos_huella)
         actualizar_codigo_persona(person_id, codigo)
         self.cargar_personas()
+        self.estado.config(text='✔ Código biométrico actualizado', fg='blue')
+        self.datos_huella = b''
+        self._mostrar_codigo(codigo)
+
+    def _mostrar_codigo(self, codigo: str) -> None:
+        """Actualiza el campo visible del código respetando el estado readonly."""
+        state = self.codigo_entry.cget('state')
+        self.codigo_entry.configure(state='normal')
+        self.codigo_var.set(codigo)
+        self.codigo_entry.configure(state=state)
 
 def main():
     root = tk.Tk()
