@@ -87,12 +87,25 @@ def guardar_en_db(nombre: str, datos: bytes) -> None:
     except mysql.connector.Error as e:
         messagebox.showerror('Error DB', f'Error al guardar: {e}')
 
-def obtener_personas() -> list[tuple[int, str, str, str | None]]:
+def obtener_personas(filtro: str | None = None) -> list[tuple[int, str, str, str | None]]:
     """Recupera las personas registradas en la tabla people."""
     try:
         conn = abrir_conexion()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, first_name, first_last_name, biometric_code FROM people")
+        if filtro:
+            patron = f"%{filtro}%"
+            cursor.execute(
+                """
+                SELECT id, first_name, first_last_name, biometric_code
+                FROM people
+                WHERE first_name LIKE %s
+                   OR first_last_name LIKE %s
+                   OR COALESCE(biometric_code, '') LIKE %s
+                """,
+                (patron, patron, patron),
+            )
+        else:
+            cursor.execute("SELECT id, first_name, first_last_name, biometric_code FROM people")
         rows = cursor.fetchall()
         cursor.close(); conn.close()
         return rows
@@ -200,6 +213,7 @@ class AplicacionHuella(tk.Frame):
         self.nombre_var = tk.StringVar()
         self.datos_huella = b''
         self.codigo_var = tk.StringVar()
+        self.busqueda_var = tk.StringVar()
 
         tk.Label(self, text='Nombre o ID (sólo para registro):').place(x=20,y=20)
         tk.Entry(self, textvariable=self.nombre_var, width=40).place(x=200,y=20)
@@ -219,14 +233,19 @@ class AplicacionHuella(tk.Frame):
 
         ttk.Separator(self, orient='horizontal').place(x=20, y=210, width=520)
 
-        tk.Label(self, text='Código biométrico:').place(x=20, y=230)
+        tk.Label(self, text='Buscar:').place(x=20, y=240)
+        tk.Entry(self, textvariable=self.busqueda_var, width=30).place(x=80, y=240)
+        tk.Button(self, text='Aplicar búsqueda', command=self.on_buscar).place(x=320, y=235, width=140, height=30)
+        tk.Button(self, text='Limpiar', command=self.on_limpiar_busqueda).place(x=470, y=235, width=70, height=30)
+
+        tk.Label(self, text='Código biométrico:').place(x=20, y=270)
         self.codigo_entry = tk.Entry(self, textvariable=self.codigo_var, width=60, state='readonly')
-        self.codigo_entry.place(x=160, y=230)
+        self.codigo_entry.place(x=160, y=270)
         tk.Button(self, text='Actualizar código', command=self.on_actualizar_codigo,
-                  bg='#FF9800', fg='white').place(x=360, y=225, width=160, height=30)
+                  bg='#FF9800', fg='white').place(x=360, y=265, width=160, height=30)
 
         tabla_frame = ttk.LabelFrame(self, text='Personas (tabla people)')
-        tabla_frame.place(x=20, y=270, width=520, height=200)
+        tabla_frame.place(x=20, y=310, width=520, height=160)
 
         columns = ('first_name', 'first_last_name', 'biometric_code')
         self.tabla = ttk.Treeview(tabla_frame, columns=columns, show='headings', height=6)
@@ -306,13 +325,17 @@ class AplicacionHuella(tk.Frame):
             self.estado.config(text='✖ Huella no reconocida', fg='red')
             messagebox.showwarning('Validación','No se encontró coincidencia en la base de datos.')
 
-    def cargar_personas(self):
+    def cargar_personas(self, filtro: str | None = None):
         """Carga los registros de la tabla people en el Treeview."""
         for item in self.tabla.get_children():
             self.tabla.delete(item)
-        for person_id, first_name, first_last_name, codigo in obtener_personas():
+        for person_id, first_name, first_last_name, codigo in obtener_personas(filtro):
             self.tabla.insert('', 'end', iid=str(person_id),
                               values=(first_name, first_last_name, codigo or ''))
+        for seleccion in self.tabla.selection():
+            self.tabla.selection_remove(seleccion)
+        self._mostrar_codigo('')
+        self.datos_huella = b''
 
     def on_seleccionar_persona(self, _event=None):
         """Cuando se selecciona una persona, muestra su código actual."""
@@ -343,6 +366,14 @@ class AplicacionHuella(tk.Frame):
         self.estado.config(text='✔ Código biométrico actualizado', fg='blue')
         self.datos_huella = b''
         self._mostrar_codigo(codigo)
+
+    def on_buscar(self):
+        filtro = self.busqueda_var.get().strip()
+        self.cargar_personas(filtro or None)
+
+    def on_limpiar_busqueda(self):
+        self.busqueda_var.set('')
+        self.cargar_personas()
 
     def _mostrar_codigo(self, codigo: str) -> None:
         """Actualiza el campo visible del código respetando el estado readonly."""
